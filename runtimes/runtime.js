@@ -5,7 +5,7 @@ if (process.stdout._handle) {
 }
 
 function log(msg, data) {
-	process.stdout.write(JSON.stringify({
+	process.stderr.write(JSON.stringify({
 		"level": "debug",
 		"context": "runtime",
 		"data": data,
@@ -57,7 +57,6 @@ async function returnResult(socket, programOutput) {
 async function init(inputData) {
 	try {
 		// Inside of the try catch statement to ensure that any exceptions thrown here are logged.
-		const socket = inputData[ "socket" ];
 		const input = inputData[ "input" ];
 
 		const importPath = inputData["import_path"];

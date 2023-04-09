@@ -3,6 +3,7 @@ package pkg
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"github.com/breadchris/protoflow/runtimes"
 	"github.com/rs/zerolog/log"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -50,40 +52,49 @@ func findDefaultEntrypoint(dir string) (string, error) {
 			fallthrough
 		case "index.ts":
 			return file.Name(), nil
+		case "main.py":
+			return file.Name(), nil
 		}
 	}
 
 	return "", nil
 }
 
-func getLanguageCmd(file string) string {
-	ext := path.Ext(file)
-	switch ext {
-	case ".py":
-		return "python"
-	case ".go":
-		return "go"
-	case ".js":
-		return "node"
-	case ".ts":
-		return "ts-node"
-	}
-	return ""
+type Runtime struct {
+	LanguageCmd     string
+	DefaultFunction string
+	File            string
 }
 
-func getLanguageDefaultFunction(file string) string {
+func loadLanguageRuntime(file string) (Runtime, error) {
 	ext := path.Ext(file)
 	switch ext {
 	case ".py":
-		return "handler"
-	case ".go":
-		return "Handler"
+		return Runtime{
+			LanguageCmd:     "python",
+			DefaultFunction: "handler",
+			File:            "runtime.py",
+		}, nil
 	case ".js":
-		return "handle"
+		return Runtime{
+			LanguageCmd:     "node",
+			DefaultFunction: "handle",
+			File:            "runtime.js",
+		}, nil
 	case ".ts":
-		return "default"
+		return Runtime{
+			LanguageCmd:     "ts-node",
+			DefaultFunction: "default",
+			File:            "runtime.js",
+		}, nil
 	}
-	return ""
+	return Runtime{}, fmt.Errorf("unknown language for file %s", file)
+}
+
+type RuntimeStdin struct {
+	Input        string `json:"input"`
+	ImportPath   string `json:"import_path"`
+	FunctionName string `json:"function_name"`
 }
 
 func CallFunction(importPath, functionName string, input string) (result json.RawMessage, err error) {
@@ -94,13 +105,31 @@ func CallFunction(importPath, functionName string, input string) (result json.Ra
 	}
 	defer cleanup()
 
-	content, err := runtimes.Runtimes.ReadFile("runtime.js")
+	absImportPath, err := filepath.Abs(importPath)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get absolute path")
+		return
+	}
+
+	entrypoint, err := findDefaultEntrypoint(absImportPath)
+	if err != nil || entrypoint == "" {
+		log.Error().Err(err).Str("importPath", absImportPath).Msg("failed to find default entrypoint")
+		return
+	}
+
+	runtime, err := loadLanguageRuntime(entrypoint)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to load language runtime")
+		return
+	}
+
+	content, err := runtimes.Runtimes.ReadFile(runtime.File)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to read runtime.js")
 		return
 	}
 
-	runtimePath := path.Join(tmpDir, "runtime.js")
+	runtimePath := path.Join(tmpDir, runtime.File)
 	err = os.WriteFile(runtimePath, content, 0644)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to write runtime.js")
@@ -115,31 +144,17 @@ func CallFunction(importPath, functionName string, input string) (result json.Ra
 		return
 	}
 
-	type RuntimeStdin struct {
-		Input        string `json:"input"`
-		ImportPath   string `json:"import_path"`
-		FunctionName string `json:"function_name"`
-	}
-
-	absImportPath, err := filepath.Abs(importPath)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to get absolute path")
-		return
-	}
-
-	entrypoint, err := findDefaultEntrypoint(absImportPath)
-	if err != nil || entrypoint == "" {
-		log.Error().Err(err).Str("importPath", absImportPath).Msg("failed to find default entrypoint")
-		return
-	}
-
 	if functionName == "" {
-		functionName = getLanguageDefaultFunction(entrypoint)
+		functionName = runtime.DefaultFunction
 	}
+
+	ext := filepath.Ext(entrypoint)
+	basename := strings.TrimSuffix(entrypoint, ext)
 
 	stdin := RuntimeStdin{
-		Input:        input,
-		ImportPath:   path.Join(absImportPath, entrypoint),
+		Input: input,
+		//ImportPath:   path.Join(absImportPath, entrypoint),
+		ImportPath:   basename,
 		FunctionName: functionName,
 	}
 
@@ -149,16 +164,11 @@ func CallFunction(importPath, functionName string, input string) (result json.Ra
 		return
 	}
 
-	languageCmd := getLanguageCmd(entrypoint)
-	if languageCmd == "" {
-		log.Error().Msgf("Unknown language for file: %v", entrypoint)
-		return
-	}
-
-	cmd := exec.Command(languageCmd, runtimePath)
+	cmd := exec.Command(runtime.LanguageCmd, runtimePath)
 
 	cmd.Dir = absImportPath
 	cmd.Env = append(os.Environ(), "PROTOFLOW_SOCKET="+unixSocket)
+	cmd.Env = append(cmd.Env, "PYTHONPATH="+absImportPath)
 
 	cleanup, err = startProcess(cmd)
 	if err != nil {
